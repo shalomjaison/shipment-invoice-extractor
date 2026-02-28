@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+google-cloud-documentai
+google-cloud-storage
+google-auth
+google-api-python-client
+google-generativeai
+aiohttp
+pydantic
