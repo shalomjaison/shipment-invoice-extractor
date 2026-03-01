@@ -10,6 +10,12 @@ credentials = service_account.Credentials.from_service_account_file(SERVICE_ACCO
 
 app = FastAPI()
 
+class FileData(BaseModel):
+    base64_content: str
+    mime_type: str
+    filename: str
+
+
 @app.get("/")
 async def health_check():
     return {"status": "healthy"}
@@ -20,6 +26,14 @@ async def test_auth():
         "project_id": credentials.project_id,
         "service_account_email": credentials.service_account_email,
     }
+
+@app.post("/classify")
+async def classify_document(file: FileData):
+    return { 
+        "received_filename": file.filename,
+        "mime_type": file.mime_type,
+        "base64_length": len(file.base64_content)
+        }
 
 if __name__ == "__main__":
     import uvicorn

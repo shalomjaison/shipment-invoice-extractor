@@ -1,0 +1,16 @@
+{
+  "deny": [
+    "Read(./.env)",
+    "Read(./.env.*)",
+    "Read(./secrets/**)",
+    "Read(./**/*.key)",
+    "Read(./**/*.pem)",
+    "Read(./**/credentials*.json)",
+    "Read(./**/*-key.json)",
+    "Read(./**/private*.json)",
+    "Shell(cat .env*)",
+    "Shell(cat secrets/**)",
+    "Shell(type .env*)",
+    "Shell(type secrets/**)"
+  ]
+}
