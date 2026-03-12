@@ -4,9 +4,19 @@ from typing import List
 import os
 from google.oauth2 import service_account
 
-SERVICE_ACCOUNT_FILE = os.path.join(os.path.dirname(__file__), 'secrets', 'shipment-invoice-extractor-1300acac7dd8.json')
-SCOPES = ['https://www.googleapis.com/auth/cloud-platform','https://www.googleapis.com/auth/spreadsheets']
-credentials = service_account.Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
+GOOGLE_APPLICATION_CREDENTIALS = os.environ.get(
+    'GOOGLE_APPLICATION_CREDENTIALS',
+    os.path.join(os.path.dirname(__file__), 'secrets', 'shipment-invoice-extractor-1300acac7dd8.json')
+)
+GOOGLE_CLOUD_PROJECT = os.environ.get('GOOGLE_CLOUD_PROJECT', 'shipment-invoice-extractor')
+GOOGLE_CLOUD_LOCATION = os.environ.get('GOOGLE_CLOUD_LOCATION', 'us-central1')
+
+SCOPES = [
+    'https://www.googleapis.com/auth/cloud-platform',
+    'https://www.googleapis.com/auth/spreadsheets',
+    'https://www.googleapis.com/auth/drive',
+]
+credentials = service_account.Credentials.from_service_account_file(GOOGLE_APPLICATION_CREDENTIALS, scopes=SCOPES)
 
 app = FastAPI()
 
@@ -33,7 +43,7 @@ async def classify_document(file: FileData):
         "received_filename": file.filename,
         "mime_type": file.mime_type,
         "base64_length": len(file.base64_content)
-        }
+    }
 
 if __name__ == "__main__":
     import uvicorn
