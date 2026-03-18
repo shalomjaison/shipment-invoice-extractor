@@ -1,8 +1,9 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import List
-import os
 from google.oauth2 import service_account
+from clfl_core_library import DriveManager
+import os
 
 GOOGLE_APPLICATION_CREDENTIALS = os.environ.get(
     'GOOGLE_APPLICATION_CREDENTIALS',
@@ -17,6 +18,7 @@ SCOPES = [
     'https://www.googleapis.com/auth/drive',
 ]
 credentials = service_account.Credentials.from_service_account_file(GOOGLE_APPLICATION_CREDENTIALS, scopes=SCOPES)
+drive_manager = DriveManager(credentials)
 
 app = FastAPI()
 
