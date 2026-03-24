@@ -17,7 +17,7 @@ TOOL_DEFINITIONS = [
         },
     },
     {
-        "name": "list_files_in_folder",
+        "name": "list_folder_files",
         "description": (
             "List all files inside a Google Drive folder. "
             "Returns a list of file objects with id, name, and mimeType."
@@ -28,7 +28,11 @@ TOOL_DEFINITIONS = [
                 "folder_id": {
                     "type": "string",
                     "description": "The Google Drive folder ID to list files from.",
-                }
+                },
+                "drive_id": {
+                    "type": "string",
+                    "description": "The Google Drive ID that the folder from which the files are listed belongs to.",
+                },
             },
             "required": ["folder_id", "drive_id"],
         },
@@ -37,7 +41,7 @@ TOOL_DEFINITIONS = [
         "name": "download_file",
         "description": (
             "Download a file from Google Drive by its file ID. "
-            "Returns the file content as base64 and its MIME type. "
+            "Returns the file content as base64. "
             "Use this before calling extract_invoice_data."
         ),
         "parameters": {
@@ -47,17 +51,13 @@ TOOL_DEFINITIONS = [
                     "type": "string",
                     "description": "The Google Drive file ID to download.",
                 },
-                "file_name": {
-                    "type": "string",
-                    "description": "The file name (used for logging and error messages).",
-                },
             },
             "required": ["file_id"],
         },
     },
     {
-        "name": "move_file",
-        "description": "Move a file to a different folder in Google Drive.",
+        "name": "move_file_to_folder",
+        "description": "Move a file to a different folder in Google Drive. ",
         "parameters": {
             "type": "object",
             "properties": {
@@ -65,12 +65,12 @@ TOOL_DEFINITIONS = [
                     "type": "string",
                     "description": "The Google Drive file ID to move.",
                 },
-                "destination_folder_id": {
+                "folder_id": {
                     "type": "string",
-                    "description": "The folder ID of the destination folder.",
+                    "description": "The Google Drive folder ID to move the file to.",
                 },
             },
-            "required": ["file_id", "destination_folder_id"],
+            "required": ["file_id", "folder_id"],
         },
     },
     {
@@ -135,20 +135,16 @@ TOOL_DEFINITIONS = [
                     "type": "string",
                     "description": "The Google Sheets spreadsheet ID.",
                 },
-                "rows": {
+                "range": {
+                    "type": "string",
+                    "description": "The range of the spreadsheet to append the rows to, e.g. 'Sheet1!A1:G50'.",
+                },
+                "values": {
                     "type": "array",
-                    "description": (
-                        "List of rows to append. Each row is a list of cell values "
-                        "in this order: invoice_number, date, vendor_name, issued_to, "
-                        "description, total_amount, currency."
-                    ),
-                    "items": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                    },
+                    "description": "List of rows to append. Each row is a list of cell values.",
                 },
             },
-            "required": ["spreadsheet_id", "rows"],
+            "required": ["spreadsheet_id", "range", "values"],
         },
     },
     {

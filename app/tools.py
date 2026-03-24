@@ -1,8 +1,10 @@
-from clfl_core_library import DriveManager, extract_year_from_shipment_number, SheetsManager
+from clfl_core_library import DriveManager, extract_year_from_shipment, SheetsManager
+from google.genai import types
 from google.oauth2 import service_account
 from google import genai
 import base64
 import os
+import json
 
 _drive_manager = None
 _sheets_manager = None
@@ -47,15 +49,22 @@ def find_shipment_folder(shipment_number: str) -> dict:
     Finds the Google Drive folder for a shipment by its number.
     Returns {id, name, drive_id} if found, raises exception if not found.
     """
-    result = get_drive_manager().find_shipment_folder(shipment_number)
+    drive_manager = get_drive_manager()
+    result = drive_manager.find_shipment_folder(shipment_number)
     if not result:
         raise Exception(f"Shipment folder not found: {shipment_number}")
+    
+    # Add drive_id to the result
+    year = extract_year_from_shipment(shipment_number)
+    drive_id = drive_manager.get_shared_drive_by_year(year)
+    result['drive_id'] = drive_id
+    
     return result
 
 def list_folder_files(folder_id: str, drive_id: str) -> list[dict]:
     """
     Lists all files in a folder on a shared drive.
-    Returns list of {file_id, file_name, mime_type, size, url}
+    Returns list of {id, name, mimeType}
     """
     return get_drive_manager().list_shipment_files(folder_id, drive_id)
 
@@ -133,5 +142,44 @@ def extract_invoice_data(file_base64: str, mime_type: str, filename: str) -> dic
             "description": str
         }
     """
-    raise NotImplementedError("Not implemented")
+    __genai_client = get_gemini_client()
+    prompt = f"""
+        You are extracting structured invoice metadata.
+
+        Return ONLY valid JSON.
+        Do not include markdown fences.
+        Do not include explanations.
+
+        Schema:
+        {{
+        "invoice_number": string | null,
+        "date": string | null,
+        "total_amount": number | null,
+        "vendor_name": string | null,
+        "currency": string | null,
+        "issued_to": string | null,
+        "description": string | null
+        }}
+
+        Rules:
+        - Extract from the document only.
+        - If a field is missing or uncertain, return null.
+        - date must be exactly as seen unless a clean ISO date is obvious.
+        - total_amount must be numeric only, no currency symbols, no commas unless needed for decimal parsing.
+        - currency should be the currency code or symbol shown in the invoice.
+        - description should be a short summary of what the invoice is for.
+        - If the invoice is not in English, translate it to English.
+        - If output is not valid JSON, fix it before returning.
+        - Use the filename only as weak context: {filename}
+    """
+
+    file_bytes = base64.b64decode(file_base64)
+    response = __genai_client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=[prompt, types.Part.from_bytes(data=file_bytes, mime_type=mime_type)],
+        config=types.GenerateContentConfig(
+        response_mime_type="application/json"
+        )
+    )
+    return json.loads(response.text)
     
