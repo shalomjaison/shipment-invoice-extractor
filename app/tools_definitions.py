@@ -77,6 +77,7 @@ TOOL_DEFINITIONS = [
         "name": "extract_invoice_data",
         "description": (
             "Extract structured invoice data from a file using Gemini Vision. "
+            "The file is downloaded internally using the file_id."
             "Accepts PDFs and images (scanned or digital). "
             "Returns fields: invoice_number, date, vendor_name, issued_to, "
             "description, total_amount, currency."
@@ -84,9 +85,9 @@ TOOL_DEFINITIONS = [
         "parameters": {
             "type": "object",
             "properties": {
-                "file_base64": {
+                "file_id": {
                     "type": "string",
-                    "description": "Base64-encoded file content returned by download_file.",
+                    "description": "The Google Drive file ID to extract data from.",
                 },
                 "mime_type": {
                     "type": "string",
@@ -97,7 +98,7 @@ TOOL_DEFINITIONS = [
                     "description": "Original file name, used for logging.",
                 },
             },
-            "required": ["file_base64", "mime_type", "filename"],
+            "required": ["file_id", "mime_type", "filename"],
         },
     },
     {

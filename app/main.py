@@ -7,7 +7,7 @@ import os
 
 GOOGLE_APPLICATION_CREDENTIALS = os.environ.get(
     'GOOGLE_APPLICATION_CREDENTIALS',
-    os.path.join(os.path.dirname(__file__), 'secrets', 'shipment-invoice-extractor-1300acac7dd8.json')
+    os.path.join(os.path.dirname(__file__), '..', 'secrets', 'shipment-invoice-extractor-1300acac7dd8.json')
 )
 GOOGLE_CLOUD_PROJECT = os.environ.get('GOOGLE_CLOUD_PROJECT', 'shipment-invoice-extractor')
 GOOGLE_CLOUD_LOCATION = os.environ.get('GOOGLE_CLOUD_LOCATION', 'us-central1')
@@ -37,6 +37,7 @@ async def test_auth():
     return {
         "project_id": credentials.project_id,
         "service_account_email": credentials.service_account_email,
+        "scopes": list(credentials.scopes) if credentials.scopes else None,
     }
 
 @app.post("/classify")

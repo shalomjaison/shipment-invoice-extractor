@@ -1,6 +1,7 @@
 from clfl_core_library import DriveManager, extract_year_from_shipment, SheetsManager
 from google.genai import types
 from google.oauth2 import service_account
+import google.auth
 from google import genai
 import base64
 import os
@@ -9,13 +10,35 @@ import json
 _drive_manager = None
 _sheets_manager = None
 _genai_client = None
+SCOPES = [
+    'https://www.googleapis.com/auth/cloud-platform',
+    'https://www.googleapis.com/auth/spreadsheets',
+    'https://www.googleapis.com/auth/drive',
+]
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+DEFAULT_CREDS = os.path.join(
+    PROJECT_ROOT,
+    "secrets",
+    "shipment-invoice-extractor-1300acac7dd8.json",
+)
+
+GOOGLE_APPLICATION_CREDENTIALS = os.environ.get(
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    DEFAULT_CREDS,
+)
 
 def get_credentials():
     """Shared credentials loader"""
-    creds_path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
+    if os.environ.get('USE_USER_CREDENTIALS') == '1':
+        creds, _ = google.auth.default(scopes=SCOPES)
+        print(f"[DEBUG] Using ADC credentials: type={type(creds).__name__}")
+        return creds
+    creds_path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS') or GOOGLE_APPLICATION_CREDENTIALS
     if not creds_path:
         raise ValueError("GOOGLE_APPLICATION_CREDENTIALS not set")
-    return service_account.Credentials.from_service_account_file(creds_path)
+    creds = service_account.Credentials.from_service_account_file(creds_path, scopes=SCOPES)
+    print(f"[DEBUG] Using service account: {creds.service_account_email}")
+    return creds
 
 def get_drive_manager() -> DriveManager:
     global _drive_manager
@@ -68,13 +91,13 @@ def list_folder_files(folder_id: str, drive_id: str) -> list[dict]:
     """
     return get_drive_manager().list_shipment_files(folder_id, drive_id)
 
-def download_file(file_id: str) -> str:
-    """
-    Downloads file content from Google Drive and returns as base64 string.
-    Use this before sending files to Gemini for analysis.
-    """
-    content_bytes = get_drive_manager().download_file_content(file_id)
-    return base64.b64encode(content_bytes).decode('utf-8')
+# def download_file(file_id: str) -> str:
+#     """
+#     Downloads file content from Google Drive and returns as base64 string.
+#     Use this before sending files to Gemini for analysis.
+#     """
+#     content_bytes = get_drive_manager().download_file_content(file_id)
+#     return base64.b64encode(content_bytes).decode('utf-8')
 
 def move_file_to_folder(file_id: str, folder_id: str) -> dict:
     """
@@ -88,16 +111,12 @@ def move_file_to_folder(file_id: str, folder_id: str) -> dict:
 
 def create_spreadsheet(title: str, folder_id: str = None) -> dict:
     """
-    Creates a new Google Spreadsheet.
-    If folder_id provided, moves it to that folder after creation.
+    Creates a new Google Spreadsheet via Drive API (bypasses Sheets API permission restriction).
+    If folder_id provided, places it directly in that folder.
     Returns {spreadsheet_id, spreadsheet_url}
     """
-    result = get_sheets_manager().create_spreadsheet(title)
     
-    if folder_id:
-        move_file_to_folder(result['spreadsheet_id'], folder_id)
-    
-    return result
+    return get_drive_manager().create_spreadsheet(title, folder_id)
 
 def append_rows(spreadsheet_id: str, range: str, values: list) -> dict:
     """
@@ -122,14 +141,14 @@ def batch_get_sheet_values(spreadsheet_id: str, ranges: list) -> list:
     return get_sheets_manager().batch_get_values(spreadsheet_id, ranges)
 
 # ======= GEMINI EXTRACTION TOOLS =======
-def extract_invoice_data(file_base64: str, mime_type: str, filename: str) -> dict:
+def extract_invoice_data(mime_type: str, filename: str, file_id: str) -> dict:
     """
-    Extracts invoice data from a file using Gemini Vision.
+    Extracts invoice data from a file using Gemini Vision. Accepts a file ID and downloads the file content internally.
     
     Args:
-        file_base64: Base64-encoded file content
         mime_type: MIME type (e.g., 'application/pdf', 'image/jpeg')
         filename: Original filename for context
+        file_id: Google Drive file ID
     
     Returns:
         {
@@ -173,7 +192,10 @@ def extract_invoice_data(file_base64: str, mime_type: str, filename: str) -> dic
         - Use the filename only as weak context: {filename}
     """
 
-    file_bytes = base64.b64decode(file_base64)
+    file_bytes = get_drive_manager().download_file_content(file_id)
+    print(f"[DEBUG] Downloaded {len(file_bytes)} bytes for file_id={file_id}, mime_type={mime_type}")
+    if not file_bytes:
+        raise ValueError(f"Downloaded file is empty: {file_id}")
     response = __genai_client.models.generate_content(
         model="gemini-2.5-flash",
         contents=[prompt, types.Part.from_bytes(data=file_bytes, mime_type=mime_type)],
