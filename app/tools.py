@@ -207,11 +207,26 @@ def extract_invoice_data(mime_type: str, filename: str, file_id: str) -> dict:
 
 def sniff_file_invoice(file_id: str, mime_type: str) -> str:
     """
-    Download a file and extract a quick text sample for invoice triage.
+    Download a file from Google Drive and extract a short text sample for triage.
 
-    Supports PDF (first page text) and DOCX (first paragraph text).
-    Raises ValueError if the downloaded file is empty.
-    Returns the extracted text snippet used for relevance checks.
+    Used as a cheap first pass before sending a document to an LLM classifier.
+    Extracts text based on MIME type:
+      - PDF: text from the first page via pdfplumber
+      - DOCX: text from the first paragraph via python-docx
+      - XLSX: first 10 rows of the active sheet, cells joined with " | "
+      - EML (message/rfc822): decoded plain-text body payload
+      - Images (image/*): returns None (no text to extract; caller handles via vision)
+
+    Args:
+        file_id: Google Drive file ID to download.
+        mime_type: MIME type of the file, used to select the extraction strategy.
+
+    Returns:
+        Up to 500 characters of extracted text, or None if the file type
+        requires vision-based classification (e.g. images).
+
+    Raises:
+        ValueError: If the downloaded file content is empty.
     """
     file_bytes = get_drive_manager().download_file_content(file_id, mime_type)
     if not file_bytes:
@@ -259,6 +274,30 @@ def sniff_file_invoice(file_id: str, mime_type: str) -> str:
     return text[:500]
 
 def classify_excerpt(file_id: str, mime_type: str, text: str | None, user_prompt: str) -> str:
+    """
+    Classify a document as relevant or skip using Gemini Flash Lite.
+
+    Two modes depending on whether a text excerpt is available:
+      - Text mode (text is not None): sends the user prompt + text excerpt to the
+        model as plain text. Faster and cheaper.
+      - Vision mode (text is None): downloads the raw file bytes and sends them
+        as an inline Part alongside the prompt. Used for image-only documents
+        where no text could be extracted by sniff_file_invoice.
+
+    The model is instructed to reply with exactly one word: "relevant" or "skip".
+
+    Args:
+        file_id: Google Drive file ID (only downloaded in vision mode).
+        mime_type: MIME type of the file (used for inline Part in vision mode).
+        text: Short text excerpt from sniff_file_invoice, or None for images.
+        user_prompt: The original user request describing what files to look for.
+
+    Returns:
+        "relevant" if the document matches the user's request, "skip" otherwise.
+
+    Raises:
+        ValueError: If vision mode is triggered but the downloaded file is empty.
+    """
     __genai_client = get_gemini_client()
     if text is not None:
         prompt = f"""
@@ -305,14 +344,32 @@ def classify_excerpt(file_id: str, mime_type: str, text: str | None, user_prompt
 
 def triage_file_invoice(file_id: str, file_name: str, mime_type: str, user_prompt: str) -> str:
     """
-    Determine whether a file should be processed for invoice extraction.
+    Decide whether a file should be extracted, skipped, or recursed into.
 
-    Inputs: `file_id`, `file_name`, and `mime_type`.
-    Returns one of: `relevant`, `skip`, or `recurse`.
+    This is the entry point for the pre-extraction triage stage. It runs a
+    layered decision pipeline to avoid sending irrelevant or unsupported files
+    to the full Gemini extraction model (extract_invoice_data).
 
-    Decision flow for this function:
-    list_folder_files -> triage (hard MIME skip -> text sniff -> keyword scan -> Flash classify) -> full extraction.
-    Called by the orchestrator before `extract_invoice_data` (full extraction).
+    Pipeline:
+      1. Hard MIME skip — immediately returns "skip" for archive, video, and
+         audio types that can never contain invoice data.
+      2. Folder check — returns "recurse" for Google Drive folders so the
+         caller can list and triage their contents recursively.
+      3. Text sniff — calls sniff_file_invoice to extract a short text sample
+         from the file without invoking an LLM.
+      4. LLM classify — passes the text sample (or raw image bytes for images)
+         to classify_excerpt, which uses Gemini Flash Lite to decide relevance.
+
+    Args:
+        file_id: Google Drive file ID.
+        file_name: Display name of the file (reserved for future keyword pre-filter).
+        mime_type: MIME type used to route through the pipeline.
+        user_prompt: The original user request, forwarded to the LLM classifier.
+
+    Returns:
+        "relevant" — file should be passed to extract_invoice_data.
+        "skip"     — file is not relevant or not supported; ignore it.
+        "recurse"  — file is a folder; list its contents and triage each child.
     """
     # Layer 1: Hard MIME SKIP for INVOICE FILES AS OF NOW
     HARD_SKIP_MIME_TYPES = [
