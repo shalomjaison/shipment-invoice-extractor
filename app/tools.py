@@ -192,7 +192,7 @@ def extract_invoice_data(mime_type: str, filename: str, file_id: str) -> dict:
         - Use the filename only as weak context: {filename}
     """
 
-    file_bytes = get_drive_manager().download_file_content(file_id)
+    file_bytes = get_drive_manager().download_file_content(file_id, mime_type)
     print(f"[DEBUG] Downloaded {len(file_bytes)} bytes for file_id={file_id}, mime_type={mime_type}")
     if not file_bytes:
         raise ValueError(f"Downloaded file is empty: {file_id}")
@@ -204,4 +204,130 @@ def extract_invoice_data(mime_type: str, filename: str, file_id: str) -> dict:
         )
     )
     return json.loads(response.text)
+
+def sniff_file_invoice(file_id: str, mime_type: str) -> str:
+    """
+    Download a file and extract a quick text sample for invoice triage.
+
+    Supports PDF (first page text) and DOCX (first paragraph text).
+    Raises ValueError if the downloaded file is empty.
+    Returns the extracted text snippet used for relevance checks.
+    """
+    file_bytes = get_drive_manager().download_file_content(file_id, mime_type)
+    if not file_bytes:
+        raise ValueError(f"Downloaded file is empty: {file_id}")
     
+    import io
+    if mime_type == "application/pdf":
+        import pdfplumber
+        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+            first_page = pdf.pages[0]
+            text = first_page.extract_text()
+            if text is None:
+                return None
+            print(f"[DEBUG] Sniffed text: {text}")
+    
+    elif mime_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+        import docx
+        doc = docx.Document(io.BytesIO(file_bytes))
+        text = doc.paragraphs[0].text
+        print(f"[DEBUG] Sniffed text: {text}")
+    
+    elif mime_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+        import openpyxl
+        workbook = openpyxl.load_workbook(io.BytesIO(file_bytes))
+        sheet = workbook.active
+        extracted_data = []
+        for row in sheet.iter_rows(max_row=10, values_only=True):
+            row_text = " | ".join(str(cell) for cell in row if cell is not None)
+            if row_text: extracted_data.append(row_text)
+        workbook.close()
+        text = "\n".join(extracted_data)
+    
+    elif mime_type.startswith("image/"):
+        return None
+    
+    elif mime_type == "message/rfc822":
+        import email
+        msg = email.message_from_bytes(file_bytes)
+        text = msg.get_payload(decode=True)
+        if text is None:
+            return None
+        text = text.decode('utf-8')
+
+    
+    return text[:500]
+
+def classify_excerpt(file_id: str, mime_type: str, text: str | None, user_prompt: str) -> str:
+    __genai_client = get_gemini_client()
+    if text is not None:
+        prompt = f"""
+        You are a document classifier for a freight forwarding company with 15 years of experience handling shipment files.
+
+        You will be given a user prompt and a short excerpt from a document. Your job is to determine whether the document is relevant to the user's request.
+
+        User prompt:
+        ```{user_prompt}```
+
+        Document excerpt:
+        ```{text}```
+
+        Reply with ONLY one word — either "relevant" or "skip". No explanation. No punctuation. No other text.
+        """
+        response = __genai_client.models.generate_content(
+            model="gemini-2.0-flash-lite",
+            contents=[prompt],
+            config=types.GenerateContentConfig(response_mime_type="text/plain")
+        )
+    else:
+        file_bytes = get_drive_manager().download_file_content(file_id, mime_type)
+        if not file_bytes:
+            raise ValueError(f"Downloaded file is empty: {file_id}")
+        
+        prompt = f"""
+        You are a document classifier for a freight forwarding company with 15 years of experience handling shipment files.
+        You will be given an image of a document or a scanned document. Your job is to determine whether the document is relevant to the user's request.
+
+        User prompt:
+        ```{user_prompt}```
+
+        Reply with ONLY one word — either "relevant" or "skip". No explanation. No punctuation. No other text.
+        """
+        response = __genai_client.models.generate_content(
+            model="gemini-2.0-flash-lite",
+            contents=[prompt, types.Part.from_bytes(data=file_bytes, mime_type=mime_type)],
+            config=types.GenerateContentConfig(response_mime_type="text/plain")
+        )
+    
+    return response.text.strip().lower()
+
+
+
+def triage_file_invoice(file_id: str, file_name: str, mime_type: str, user_prompt: str) -> str:
+    """
+    Determine whether a file should be processed for invoice extraction.
+
+    Inputs: `file_id`, `file_name`, and `mime_type`.
+    Returns one of: `relevant`, `skip`, or `recurse`.
+
+    Decision flow for this function:
+    list_folder_files -> triage (hard MIME skip -> text sniff -> keyword scan -> Flash classify) -> full extraction.
+    Called by the orchestrator before `extract_invoice_data` (full extraction).
+    """
+    # Layer 1: Hard MIME SKIP for INVOICE FILES AS OF NOW
+    HARD_SKIP_MIME_TYPES = [
+        "application/x-rar-compressed",
+        "application/x-7z-compressed",
+        "video/mp4",
+        "video/quicktime",
+        "audio/mpeg",
+        "audio/wav",
+    ]
+
+    if mime_type in HARD_SKIP_MIME_TYPES:
+        return "skip"
+    elif mime_type == "application/vnd.google-apps.folder":
+        return "recurse"
+    
+    text = sniff_file_invoice(file_id, mime_type)
+    return classify_excerpt(file_id, mime_type, text, user_prompt)
