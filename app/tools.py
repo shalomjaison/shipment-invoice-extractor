@@ -228,6 +228,8 @@ def sniff_file_invoice(file_id: str, mime_type: str) -> str:
     Raises:
         ValueError: If the downloaded file content is empty.
     """
+    if mime_type.startswith("image/"):
+      return None
     file_bytes = get_drive_manager().download_file_content(file_id, mime_type)
     if not file_bytes:
         raise ValueError(f"Downloaded file is empty: {file_id}")
@@ -259,9 +261,6 @@ def sniff_file_invoice(file_id: str, mime_type: str) -> str:
         workbook.close()
         text = "\n".join(extracted_data)
     
-    elif mime_type.startswith("image/"):
-        return None
-    
     elif mime_type == "message/rfc822":
         import email
         msg = email.message_from_bytes(file_bytes)
@@ -269,6 +268,8 @@ def sniff_file_invoice(file_id: str, mime_type: str) -> str:
         if text is None:
             return None
         text = text.decode('utf-8')
+    else:
+        return None
 
     
     return text[:500]
@@ -342,7 +343,7 @@ def classify_excerpt(file_id: str, mime_type: str, text: str | None, user_prompt
 
 
 
-def triage_file_invoice(file_id: str, file_name: str, mime_type: str, user_prompt: str) -> str:
+def triage_file_invoice(file_id: str, mime_type: str, user_prompt: str) -> str:
     """
     Decide whether a file should be extracted, skipped, or recursed into.
 
