@@ -38,24 +38,6 @@ TOOL_DEFINITIONS = [
         },
     },
     {
-        "name": "download_file",
-        "description": (
-            "Download a file from Google Drive by its file ID. "
-            "Returns the file content as base64. "
-            "Use this before calling extract_invoice_data."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "file_id": {
-                    "type": "string",
-                    "description": "The Google Drive file ID to download.",
-                },
-            },
-            "required": ["file_id"],
-        },
-    },
-    {
         "name": "move_file_to_folder",
         "description": "Move a file to a different folder in Google Drive. ",
         "parameters": {
@@ -99,6 +81,126 @@ TOOL_DEFINITIONS = [
                 },
             },
             "required": ["file_id", "mime_type", "filename"],
+        },
+    },
+    {
+        "name": "sniff_file_invoice",
+        "description": (
+            "Download a file from Google Drive and extract a short text sample for triage. "
+            "Used as a cheap first pass before sending a document to an LLM classifier. "
+            "Returns up to 500 characters of extracted text, or null if the file requires "
+            "vision-based classification (e.g. images)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "file_id": {
+                    "type": "string",
+                    "description": "Google Drive file ID to download."
+                },
+                "mime_type": {
+                    "type": "string",
+                    "description": (
+                        "MIME type of the file. Supported: application/pdf, "
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document, "
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, "
+                        "message/rfc822, image/*. Unsupported types return null."
+                    )
+                }
+            },
+            "required": ["file_id", "mime_type"]
+        }
+    },
+    {
+        "name": "classify_excerpt",
+        "description": (
+            "Classify a document as 'relevant' or 'skip' using Gemini Flash Lite. "
+            "Operates in two modes: text mode (when a text excerpt is provided) or vision mode "
+            "(when text is null, downloads and sends raw image bytes to the model). "
+            "Returns exactly one of: 'relevant' or 'skip'."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "file_id": {
+                    "type": "string",
+                    "description": "Google Drive file ID. Only downloaded in vision mode (when text is null)."
+                },
+                "mime_type": {
+                    "type": "string",
+                    "description": "MIME type of the file. Used for the inline Part in vision mode."
+                },
+                "text": {
+                    "type": ["string", "null"],
+                    "description": (
+                        "Short text excerpt from sniff_file_invoice. "
+                        "Pass null to trigger vision mode for image-only documents."
+                    )
+                },
+                "user_prompt": {
+                    "type": "string",
+                    "description": "The original user request describing what files to look for."
+                }
+            },
+            "required": ["file_id", "mime_type", "text", "user_prompt"]
+        }
+    },
+    {
+        "name": "triage_file_invoice",
+        "description": (
+            "Decide whether a file should be extracted, skipped, or recursed into. "
+            "Entry point for the pre-extraction triage stage. Runs a layered pipeline: "
+            "(1) hard MIME skip for archives/video/audio, "
+            "(2) folder check returning 'recurse', "
+            "(3) text sniff via sniff_file_invoice, "
+            "(4) LLM classification via classify_excerpt. "
+            "Returns 'relevant' (pass to extract_invoice_data), "
+            "'skip' (ignore), or 'recurse' (list folder contents and triage children)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "file_id": {
+                    "type": "string",
+                    "description": "Google Drive file ID."
+                },
+                "mime_type": {
+                    "type": "string",
+                    "description": "MIME type used to route through the triage pipeline."
+                },
+                "user_prompt": {
+                    "type": "string",
+                    "description": "The original user request, forwarded to the LLM classifier."
+                }
+            },
+            "required": ["file_id", "mime_type", "user_prompt"]
+        }
+    },
+    {
+        "name": "triage_folder_files",
+        "description": "Runs triage on a list of files from a shipment folder to determine which are relevant for invoice extraction. Returns a dict of file_id to classification (relevant, skip, or recurse).",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "files": {
+                    "type": "array",
+                    "description": "List of file objects with id and mimetype",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "name": {"type": "string"},
+                            "mimeType": {"type": "string"}
+                        },
+                        "required": ["id", "mimeType"]
+                    }
+                },
+                "user_prompt": {
+                    "type": "string",
+                    "description": "The original user request describing what kind of files to look for."
+                }
+            },
+            "required": ["files", "user_prompt"],
         },
     },
     {
@@ -166,4 +268,22 @@ TOOL_DEFINITIONS = [
             "required": ["spreadsheet_id", "range"],
         },
     },
+    {
+        "name": "batch_get_sheet_values",
+        "description": "Read multiple ranges of values from a Google Sheet. Useful for verification.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "spreadsheet_id": {
+                    "type": "string",
+                    "description": "The Google Sheets spreadsheet ID.",
+                },
+                "ranges": {
+                    "type": "array",
+                    "description": "The ranges of the spreadsheet to read from, e.g. ['Sheet1!A1:G50', 'Sheet1!H1:M50'].",
+                }
+            },
+            "required": ["spreadsheet_id", "ranges"],
+        },
+    }
 ]

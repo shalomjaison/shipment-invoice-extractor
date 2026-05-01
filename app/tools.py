@@ -1,44 +1,13 @@
 from clfl_core_library import DriveManager, extract_year_from_shipment, SheetsManager
 from google.genai import types
-from google.oauth2 import service_account
-import google.auth
-from google import genai
-import base64
 import os
 import json
+from concurrent.futures import ThreadPoolExecutor
+from app.utils import get_credentials, get_gemini_client
 
 _drive_manager = None
 _sheets_manager = None
-_genai_client = None
-SCOPES = [
-    'https://www.googleapis.com/auth/cloud-platform',
-    'https://www.googleapis.com/auth/spreadsheets',
-    'https://www.googleapis.com/auth/drive',
-]
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-DEFAULT_CREDS = os.path.join(
-    PROJECT_ROOT,
-    "secrets",
-    "shipment-invoice-extractor-1300acac7dd8.json",
-)
 
-GOOGLE_APPLICATION_CREDENTIALS = os.environ.get(
-    "GOOGLE_APPLICATION_CREDENTIALS",
-    DEFAULT_CREDS,
-)
-
-def get_credentials():
-    """Shared credentials loader"""
-    if os.environ.get('USE_USER_CREDENTIALS') == '1':
-        creds, _ = google.auth.default(scopes=SCOPES)
-        print(f"[DEBUG] Using ADC credentials: type={type(creds).__name__}")
-        return creds
-    creds_path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS') or GOOGLE_APPLICATION_CREDENTIALS
-    if not creds_path:
-        raise ValueError("GOOGLE_APPLICATION_CREDENTIALS not set")
-    creds = service_account.Credentials.from_service_account_file(creds_path, scopes=SCOPES)
-    print(f"[DEBUG] Using service account: {creds.service_account_email}")
-    return creds
 
 def get_drive_manager() -> DriveManager:
     global _drive_manager
@@ -52,18 +21,6 @@ def get_sheets_manager() -> SheetsManager:
         _sheets_manager = SheetsManager(get_credentials())
     return _sheets_manager
 
-def get_gemini_client():
-    """Lazy load the unified Gen AI client"""
-    global _genai_client
-    if _genai_client is None:
-        # The client automatically picks up GOOGLE_CLOUD_PROJECT 
-        # and GOOGLE_CLOUD_LOCATION from env vars if vertexai=True
-        _genai_client = genai.Client(
-            vertexai=True, 
-            project=os.environ.get('GCP_PROJECT_ID'),
-            location=os.environ.get('GCP_LOCATION', 'us-central1')
-        )
-    return _genai_client
 
 # ===== DRIVE TOOLS =====
 
@@ -205,7 +162,8 @@ def extract_invoice_data(mime_type: str, filename: str, file_id: str) -> dict:
     )
     return json.loads(response.text)
 
-def sniff_file_invoice(file_id: str, mime_type: str) -> str:
+
+def sniff_file_invoice(file_id: str, mime_type: str) -> str | None:
     """
     Download a file from Google Drive and extract a short text sample for triage.
 
@@ -229,27 +187,35 @@ def sniff_file_invoice(file_id: str, mime_type: str) -> str:
         ValueError: If the downloaded file content is empty.
     """
     if mime_type.startswith("image/"):
-      return None
+        return None
+
     file_bytes = get_drive_manager().download_file_content(file_id, mime_type)
     if not file_bytes:
         raise ValueError(f"Downloaded file is empty: {file_id}")
-    
+
     import io
     if mime_type == "application/pdf":
         import pdfplumber
         with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+            if not pdf.pages:
+                return None
             first_page = pdf.pages[0]
             text = first_page.extract_text()
             if text is None:
                 return None
             print(f"[DEBUG] Sniffed text: {text}")
-    
     elif mime_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
         import docx
         doc = docx.Document(io.BytesIO(file_bytes))
-        text = doc.paragraphs[0].text
+        text = None
+        for paragraph in doc.paragraphs:
+            paragraph_text = paragraph.text.strip()
+            if paragraph_text:
+                text = paragraph_text
+                break
+        if text is None:
+            return None
         print(f"[DEBUG] Sniffed text: {text}")
-    
     elif mime_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
         import openpyxl
         workbook = openpyxl.load_workbook(io.BytesIO(file_bytes))
@@ -257,22 +223,32 @@ def sniff_file_invoice(file_id: str, mime_type: str) -> str:
         extracted_data = []
         for row in sheet.iter_rows(max_row=10, values_only=True):
             row_text = " | ".join(str(cell) for cell in row if cell is not None)
-            if row_text: extracted_data.append(row_text)
+            if row_text:
+                extracted_data.append(row_text)
         workbook.close()
         text = "\n".join(extracted_data)
-    
     elif mime_type == "message/rfc822":
         import email
         msg = email.message_from_bytes(file_bytes)
-        text = msg.get_payload(decode=True)
-        if text is None:
+        payload_bytes = None
+        if msg.is_multipart():
+            for part in msg.walk():
+                content_type = part.get_content_type()
+                disposition = (part.get("Content-Disposition") or "").lower()
+                if content_type == "text/plain" and "attachment" not in disposition:
+                    payload_bytes = part.get_payload(decode=True)
+                    if payload_bytes:
+                        break
+        else:
+            payload_bytes = msg.get_payload(decode=True)
+        if payload_bytes is None:
             return None
-        text = text.decode('utf-8')
+        text = payload_bytes.decode("utf-8", errors="replace")
     else:
         return None
 
-    
     return text[:500]
+
 
 def classify_excerpt(file_id: str, mime_type: str, text: str | None, user_prompt: str) -> str:
     """
@@ -297,7 +273,7 @@ def classify_excerpt(file_id: str, mime_type: str, text: str | None, user_prompt
         "relevant" if the document matches the user's request, "skip" otherwise.
 
     Raises:
-        ValueError: If vision mode is triggered but the downloaded file is empty.
+        ValueError: If vision mode is triggered but the downloaded file is empty
     """
     __genai_client = get_gemini_client()
     if text is not None:
@@ -323,7 +299,7 @@ def classify_excerpt(file_id: str, mime_type: str, text: str | None, user_prompt
         file_bytes = get_drive_manager().download_file_content(file_id, mime_type)
         if not file_bytes:
             raise ValueError(f"Downloaded file is empty: {file_id}")
-        
+
         prompt = f"""
         You are a document classifier for a freight forwarding company with 15 years of experience handling shipment files.
         You will be given an image of a document or a scanned document. Your job is to determine whether the document is relevant to the user's request.
@@ -338,9 +314,11 @@ def classify_excerpt(file_id: str, mime_type: str, text: str | None, user_prompt
             contents=[prompt, types.Part.from_bytes(data=file_bytes, mime_type=mime_type)],
             config=types.GenerateContentConfig(response_mime_type="text/plain")
         )
-    
-    return response.text.strip().lower()
 
+    normalized = response.text.strip().lower()
+    if normalized in {"relevant", "skip"}:
+        return normalized
+    return "skip"
 
 
 def triage_file_invoice(file_id: str, mime_type: str, user_prompt: str) -> str:
@@ -363,7 +341,6 @@ def triage_file_invoice(file_id: str, mime_type: str, user_prompt: str) -> str:
 
     Args:
         file_id: Google Drive file ID.
-        file_name: Display name of the file (reserved for future keyword pre-filter).
         mime_type: MIME type used to route through the pipeline.
         user_prompt: The original user request, forwarded to the LLM classifier.
 
@@ -372,8 +349,7 @@ def triage_file_invoice(file_id: str, mime_type: str, user_prompt: str) -> str:
         "skip"     — file is not relevant or not supported; ignore it.
         "recurse"  — file is a folder; list its contents and triage each child.
     """
-    # Layer 1: Hard MIME SKIP for INVOICE FILES AS OF NOW
-    HARD_SKIP_MIME_TYPES = [
+    hard_skip_mime_types = [
         "application/x-rar-compressed",
         "application/x-7z-compressed",
         "video/mp4",
@@ -382,10 +358,50 @@ def triage_file_invoice(file_id: str, mime_type: str, user_prompt: str) -> str:
         "audio/wav",
     ]
 
-    if mime_type in HARD_SKIP_MIME_TYPES:
+    if mime_type in hard_skip_mime_types:
         return "skip"
-    elif mime_type == "application/vnd.google-apps.folder":
+    if mime_type == "application/vnd.google-apps.folder":
         return "recurse"
-    
+
     text = sniff_file_invoice(file_id, mime_type)
+    if text is None and not mime_type.startswith("image/"):
+        return "skip"
     return classify_excerpt(file_id, mime_type, text, user_prompt)
+
+def triage_folder_files(files: list[dict], user_prompt: str) -> dict:
+    """
+    Triage a batch of Drive files concurrently for invoice relevance.
+
+    Each file is evaluated via `triage_file_invoice`, which returns one of:
+    - "relevant": file should be sent for extraction
+    - "skip": file is not relevant/processable
+    - "recurse": file is a folder and its children should be triaged
+
+    Args:
+        files: List of Drive file metadata objects that include at least
+            `id` and `mimeType`.
+        user_prompt: User request used as classification context.
+
+    Returns:
+        A mapping of `file_id -> triage_decision`.
+    """
+    def triage_one(file: dict):
+        return triage_file_invoice(file['id'], file['mimeType'], user_prompt)
+
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures_by_file_id = {
+            file["id"]: executor.submit(triage_one, file)
+            for file in files
+        }
+
+    results: dict[str, str] = {}
+    for file in files:
+        file_id = file["id"]
+        try:
+            results[file_id] = futures_by_file_id[file_id].result()
+        except Exception as e:
+            print(f"[WARN] Triage failed for file_id={file_id}: {type(e).__name__}: {e}")
+            results[file_id] = "error"
+
+    return results
+
